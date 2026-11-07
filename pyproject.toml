@@ -1,0 +1,30 @@
+[project]
+name = "in-memory-vlm"
+version = "0.1.0"
+description = "Zero-disk in-memory media stream interception, frame/audio extraction, and direct VLM ingestion pipeline"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "google-genai>=0.1.1",
+    "pillow>=10.0.0",
+    "pydantic>=2.0.0",
+    "websockets>=12.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+]
+
+[project.scripts]
+vlm-watch = "in_memory_vlm.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
