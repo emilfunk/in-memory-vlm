@@ -8,8 +8,9 @@ import json
 import sys
 from typing import Optional
 
-from in_memory_vlm.browser.cdp_client import extract_from_browser_tab
-from in_memory_vlm.core.stream_pipe import extract_media_in_memory
+from in_memory_vlm.browser.cdp_client import CDPError, extract_from_browser_tab
+from in_memory_vlm.browser.opencli_client import OpenCLIError, extract_via_opencli, is_opencli_available
+from in_memory_vlm.core.stream_pipe import StreamPipeError, extract_media_in_memory
 from in_memory_vlm.vlm.claude_client import ClaudeClient
 from in_memory_vlm.vlm.gemini_client import GeminiClient
 
@@ -22,9 +23,9 @@ def parse_args(args=None):
     parser.add_argument("url", help="Media URL to inspect (YouTube, Instagram, LinkedIn, X, etc.)")
     parser.add_argument(
         "--mode",
-        choices=["auto", "pipe", "browser"],
+        choices=["auto", "pipe", "browser", "opencli"],
         default="auto",
-        help="Ingestion mode: auto selects browser for IG/LinkedIn and pipe for YouTube/X.",
+        help="Ingestion mode: auto selects opencli/browser for IG/LinkedIn and pipe for YouTube/X.",
     )
     parser.add_argument(
         "--cookies",
@@ -71,7 +72,10 @@ async def run_pipeline(args) -> dict:
     if mode == "auto":
         # Heuristic: Instagram and LinkedIn are best handled in the live browser DOM
         if "instagram.com" in url or "linkedin.com" in url:
-            mode = "browser"
+            if is_opencli_available():
+                mode = "opencli"
+            else:
+                mode = "browser"
         else:
             mode = "pipe"
 
@@ -79,20 +83,37 @@ async def run_pipeline(args) -> dict:
     audio_wav = None
     post_text = None
 
+    if mode == "opencli":
+        try:
+            browser_data = await extract_via_opencli(
+                target_url=url,
+                num_frames=args.max_frames,
+            )
+            frames = [item["base64_jpeg"] for item in browser_data.get("keyframes", [])]
+            post_text = browser_data.get("post_text")
+        except OpenCLIError as e:
+            sys.stderr.write(f"OpenCLI extraction failed ({e}), falling back to stream pipe...\n")
+            mode = "pipe"
+
     if mode == "browser":
-        # Extract via CDP from live browser tab
-        browser_data = await extract_from_browser_tab(
-            cdp_port=args.cdp_port,
-            target_url=url,
-            num_frames=args.max_frames,
-        )
-        frames = [item["base64_jpeg"] for item in browser_data.get("keyframes", [])]
-        post_text = browser_data.get("post_text")
-    else:
+        # Extract via raw CDP from live browser tab
+        try:
+            browser_data = await extract_from_browser_tab(
+                cdp_port=args.cdp_port,
+                target_url=url,
+                num_frames=args.max_frames,
+            )
+            frames = [item["base64_jpeg"] for item in browser_data.get("keyframes", [])]
+            post_text = browser_data.get("post_text")
+        except CDPError as e:
+            sys.stderr.write(f"CDP extraction failed ({e}), falling back to stream pipe...\n")
+            mode = "pipe"
+
+    if mode == "pipe":
         # Extract via yt-dlp / ffmpeg pipe in memory
         stream_data = await extract_media_in_memory(
             url=url,
-            cookies_browser=args.cookies_browser,
+            cookies_browser=args.cookies_browser or "chrome",
             max_frames=args.max_frames,
             include_audio=(args.model == "gemini"),
         )
@@ -100,7 +121,7 @@ async def run_pipeline(args) -> dict:
         audio_wav = stream_data["audio_wav"]
 
     if not frames and not audio_wav:
-        raise RuntimeError("No frames or audio could be extracted from the target media stream.")
+        raise RuntimeError(f"No frames or audio could be extracted from {url}")
 
     # Dispatch to selected VLM
     if args.model == "claude":
@@ -143,9 +164,6 @@ def main():
                 print(f"\n[Token Usage: {data['usage']}]")
     except Exception as e:
         sys.stderr.write(f"Error: {e}\n")
-        if "CDP" in str(e) or "port" in str(e):
-            sys.stderr.write("Tip: Ensure Chrome is launched with remote debugging enabled:\n")
-            sys.stderr.write("     google-chrome --remote-debugging-port=9222 (or use BrowserOS Neo)\n")
         sys.exit(1)
 
 
